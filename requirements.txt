@@ -1,0 +1,5 @@
+flask
+pyserial
+openpyxl
+qrcode[pil]
+pillow
