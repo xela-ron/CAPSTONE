@@ -166,6 +166,10 @@ DASHBOARD_HTML = """
   <div class="tab active" onclick="showTab('scans')">Live Scans</div>
   <div class="tab" onclick="showTab('tags')">Registered Tags</div>
   <div class="tab" onclick="showTab('users')">Users</div>
+  <a href="http://127.0.0.1:5000/qr-scanner" target="_blank"
+     style="margin-left:auto;background:#1a5c36;color:white;padding:8px 18px;border-radius:8px;text-decoration:none;font-size:0.85rem;font-weight:600;align-self:center">
+    📷 Open QR Scanner
+  </a>
 </div>
 
 <!-- LIVE SCANS PAGE -->
@@ -175,6 +179,54 @@ DASHBOARD_HTML = """
     <div class="stat-card"><div class="value" id="unique-tags">-</div><div class="label">Unique Tags</div></div>
     <div class="stat-card"><div class="value" id="today-scans">-</div><div class="label">Today's Scans</div></div>
     <div class="stat-card"><div class="value" id="registered-count">-</div><div class="label">Registered Tags</div></div>
+  </div>
+
+  <!-- Parking Counters -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;padding:0 32px 20px">
+    <div class="stat-card" id="adm-faculty_car" style="border-top:3px solid #3b82f6">
+      <div style="font-size:1.5rem">&#128663;</div>
+      <div style="font-size:0.72rem;color:#94a3b8;margin:4px 0">Faculty/PWD Cars</div>
+      <div style="font-size:1.6rem;font-weight:700;color:#3b82f6">
+        <span id="adm-faculty_car-avail">—</span><span style="font-size:0.9rem;color:#64748b">/31</span>
+      </div>
+      <div style="background:#1e293b;border-radius:999px;height:5px;margin-top:8px">
+        <div id="adm-faculty_car-bar" style="height:100%;border-radius:999px;background:#3b82f6;width:100%;transition:width 0.4s"></div>
+      </div>
+    </div>
+    <div class="stat-card" id="adm-faculty_moto" style="border-top:3px solid #3b82f6">
+      <div style="font-size:1.5rem">&#127949;</div>
+      <div style="font-size:0.72rem;color:#94a3b8;margin:4px 0">Faculty Motorcycles</div>
+      <div style="font-size:1.6rem;font-weight:700;color:#3b82f6">
+        <span id="adm-faculty_moto-avail">—</span><span style="font-size:0.9rem;color:#64748b">/15</span>
+      </div>
+      <div style="background:#1e293b;border-radius:999px;height:5px;margin-top:8px">
+        <div id="adm-faculty_moto-bar" style="height:100%;border-radius:999px;background:#3b82f6;width:100%;transition:width 0.4s"></div>
+      </div>
+    </div>
+    <div class="stat-card" id="adm-student_car" style="border-top:3px solid #34d399">
+      <div style="font-size:1.5rem">&#128663;</div>
+      <div style="font-size:0.72rem;color:#94a3b8;margin:4px 0">Student Cars</div>
+      <div style="font-size:1.6rem;font-weight:700;color:#34d399">
+        <span id="adm-student_car-avail">—</span><span style="font-size:0.9rem;color:#64748b">/14</span>
+      </div>
+      <div style="background:#1e293b;border-radius:999px;height:5px;margin-top:8px">
+        <div id="adm-student_car-bar" style="height:100%;border-radius:999px;background:#34d399;width:100%;transition:width 0.4s"></div>
+      </div>
+    </div>
+    <div class="stat-card" id="adm-student_moto" style="border-top:3px solid #34d399">
+      <div style="font-size:1.5rem">&#127949;</div>
+      <div style="font-size:0.72rem;color:#94a3b8;margin:4px 0">Student Motorcycles</div>
+      <div style="font-size:1.6rem;font-weight:700;color:#34d399">
+        <span id="adm-student_moto-avail">—</span><span style="font-size:0.9rem;color:#64748b">/15</span>
+      </div>
+      <div style="background:#1e293b;border-radius:999px;height:5px;margin-top:8px">
+        <div id="adm-student_moto-bar" style="height:100%;border-radius:999px;background:#34d399;width:100%;transition:width 0.4s"></div>
+      </div>
+    </div>
+  </div>
+  <div style="padding:0 32px 16px;display:flex;gap:10px;align-items:center">
+    <button onclick="resetParking()" style="background:#64748b;color:white;border:none;padding:7px 16px;border-radius:8px;cursor:pointer;font-size:0.82rem">Reset Parking Counters</button>
+    <span style="font-size:0.78rem;color:#64748b">Reset at start of each day</span>
   </div>
   <div class="controls">
     <input type="text" id="search-scan" placeholder="Search name or tag..." oninput="filterScans()">
@@ -480,7 +532,43 @@ DASHBOARD_HTML = """
   }
 
   // ── Auto refresh ──────────────────────────────────────────────
-  async function refresh() { await fetchStats(); await fetchScans(); }
+  // Parking slots for admin
+  async function fetchAdminParking() {
+    try {
+      const res  = await fetch('http://127.0.0.1:5000/api/parking/slots');
+      const data = await res.json();
+      const colors = {ok:'#3b82f6', warning:'#f59e0b', full:'#ef4444'};
+      const scolors = {ok:'#34d399', warning:'#f59e0b', full:'#ef4444'};
+      for (const [type, slot] of Object.entries(data)) {
+        const availEl = document.getElementById('adm-' + type + '-avail');
+        const barEl   = document.getElementById('adm-' + type + '-bar');
+        const cardEl  = document.getElementById('adm-' + type);
+        if (!availEl) continue;
+        const isFaculty = type.startsWith('faculty');
+        const c = slot.status === 'ok' ? (isFaculty ? '#3b82f6' : '#34d399')
+                : slot.status === 'warning' ? '#f59e0b' : '#ef4444';
+        availEl.textContent = slot.available;
+        availEl.style.color = c;
+        barEl.style.width   = (slot.available / slot.capacity * 100) + '%';
+        barEl.style.background = c;
+        if (cardEl) cardEl.style.borderTopColor = c;
+        if (slot.status === 'full' && cardEl) {
+          cardEl.style.background = 'rgba(239,68,68,0.1)';
+        }
+      }
+    } catch(e) {}
+  }
+
+  async function resetParking() {
+    if (!confirm('Reset all parking counters to 0?')) return;
+    try {
+      await fetch('http://127.0.0.1:5000/api/parking/reset', {method:'POST'});
+      fetchAdminParking();
+      alert('Parking counters reset!');
+    } catch(e) { alert('Could not connect to app server'); }
+  }
+
+  async function refresh() { await fetchStats(); await fetchScans(); await fetchAdminParking(); }
   refresh();
   setInterval(refresh, 3000);
 
@@ -658,9 +746,16 @@ def api_scans():
     conn = get_db()
     rows = conn.execute("""
         SELECT s.id, s.tag_id, s.scan_time, s.rssi, s.antenna,
-               t.name, t.student_no, t.department, t.course, t.vehicle_type, t.position
+               COALESCE(t.name, u.full_name)       AS name,
+               COALESCE(t.student_no, u.student_no) AS student_no,
+               COALESCE(t.department, u.department) AS department,
+               COALESCE(t.course, u.college)        AS course,
+               COALESCE(t.vehicle_type, u.vehicle_type) AS vehicle_type,
+               COALESCE(t.position, u.position)     AS position,
+               s.scan_type
         FROM rfid_scans s
         LEFT JOIN tag_registry t ON s.tag_id = t.tag_id
+        LEFT JOIN users u ON s.tag_id = u.student_no OR s.tag_id = u.tag_id
         ORDER BY s.id DESC LIMIT ?
     """, (limit,)).fetchall()
     conn.close()
@@ -807,4 +902,3 @@ if __name__ == "__main__":
     init_db()
     print("Starting RFID Dashboard at http://localhost:5000")
     app.run(host="0.0.0.0", port=5001, debug=False)
-

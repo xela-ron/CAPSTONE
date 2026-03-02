@@ -76,6 +76,15 @@ def init_db():
     """)
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS qr_scans (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_no TEXT NOT NULL,
+            scan_time  TEXT NOT NULL,
+            method     TEXT DEFAULT 'qr'
+        )
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS violations (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             student_no  TEXT,
@@ -100,6 +109,28 @@ def init_db():
             VALUES ('admin', ?, 'System Administrator', 'Admin', 1)
         """, (admin_hash,))
     except: pass
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS parking_slots (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            slot_type  TEXT UNIQUE NOT NULL,
+            capacity   INTEGER NOT NULL,
+            occupied   INTEGER DEFAULT 0
+        )
+    """)
+
+    # Insert default slot capacities if not exists
+    slots = [
+        ('faculty_car',   31),
+        ('faculty_moto',  15),
+        ('student_car',   14),
+        ('student_moto',  15),
+    ]
+    for slot_type, capacity in slots:
+        conn.execute("""
+            INSERT OR IGNORE INTO parking_slots (slot_type, capacity, occupied)
+            VALUES (?, ?, 0)
+        """, (slot_type, capacity))
 
     conn.commit()
     conn.close()
@@ -500,7 +531,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <p>Here's your parking activity summary</p>
       </div>
 
-      <div class="cards-row">
+      <!-- Parking Counter Section - shows only slots relevant to this user -->
+      <div style="margin-bottom:24px">
+        <div style="font-size:0.78rem;font-weight:600;color:#1a5c36;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:14px">
+          Available Parking Slots
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:16px" id="parking-slots-grid">
+          <!-- dynamically rendered by JS based on user position -->
+        </div>
+      </div>
+
+      <!-- My Stats Row -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px">
         <div class="stat-card">
           <div class="icon">&#128197;</div>
           <div class="val" id="stat-total">—</div>
@@ -515,11 +557,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div class="icon">&#9888;</div>
           <div class="val" id="stat-violations">—</div>
           <div class="lbl">Violations</div>
-        </div>
-        <div class="stat-card">
-          <div class="icon">&#128276;</div>
-          <div class="val" id="stat-notices">—</div>
-          <div class="lbl">New Notices</div>
         </div>
       </div>
 
@@ -758,10 +795,87 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>`).join('');
   }
 
+  // Determine user slot group based on position
+  const userPosition = "{{ user.position or 'Student' }}".toLowerCase();
+  const isFaculty    = ['faculty','staff'].includes(userPosition);
+  const userVehicle  = "{{ user.vehicle_type or '' }}".toLowerCase();
+  const isMoto       = ['motorcycle','motor','bike'].includes(userVehicle);
+
+  // Slot config for this user
+  const slotConfig = isFaculty
+    ? [
+        {type:'faculty_car',  label:'Cars',        icon:'&#128663;', total:31, color:'#1a5c36'},
+        {type:'faculty_moto', label:'Motorcycles',  icon:'&#127949;', total:15, color:'#1a5c36'}
+      ]
+    : [
+        {type:'student_car',  label:'Cars',        icon:'&#128663;', total:14, color:'#2563eb'},
+        {type:'student_moto', label:'Motorcycles',  icon:'&#127949;', total:15, color:'#2563eb'}
+      ];
+
+  // Build parking cards dynamically
+  function buildParkingCards() {
+    const grid = document.getElementById('parking-slots-grid');
+    grid.innerHTML = slotConfig.map(s => `
+      <div class="stat-card" id="slot-${s.type}" style="border-top:4px solid ${s.color};text-align:center">
+        <div style="font-size:2rem;margin-bottom:6px">${s.icon}</div>
+        <div style="font-size:0.75rem;font-weight:600;color:#6b7280;text-transform:uppercase;margin-bottom:10px">${s.label}</div>
+        <div style="display:flex;align-items:baseline;justify-content:center;gap:4px">
+          <span id="slot-${s.type}-avail" style="font-size:2.4rem;font-weight:700;color:${s.color}">—</span>
+          <span style="color:#9ca3af;font-size:1rem">/ ${s.total}</span>
+        </div>
+        <div style="font-size:0.75rem;color:#9ca3af;margin-top:4px">Available Slots</div>
+        <div style="background:#e5e7eb;border-radius:999px;height:7px;margin-top:12px;overflow:hidden">
+          <div id="slot-${s.type}-bar" style="height:100%;border-radius:999px;background:${s.color};width:100%;transition:width 0.5s"></div>
+        </div>
+        <div id="slot-${s.type}-status" style="margin-top:8px;font-size:0.78rem;font-weight:600"></div>
+      </div>
+    `).join('');
+  }
+
+  async function fetchParkingSlots() {
+    const res  = await fetch('/api/parking/slots');
+    const data = await res.json();
+    slotConfig.forEach(s => {
+      const slot    = data[s.type];
+      if (!slot) return;
+      const availEl  = document.getElementById('slot-' + s.type + '-avail');
+      const barEl    = document.getElementById('slot-' + s.type + '-bar');
+      const cardEl   = document.getElementById('slot-' + s.type);
+      const statusEl = document.getElementById('slot-' + s.type + '-status');
+      if (!availEl) return;
+
+      const color = slot.status === 'ok' ? s.color
+                  : slot.status === 'warning' ? '#f59e0b' : '#dc2626';
+
+      availEl.textContent    = slot.available;
+      availEl.style.color    = color;
+      barEl.style.width      = (slot.available / slot.capacity * 100) + '%';
+      barEl.style.background = color;
+      cardEl.style.borderTopColor = color;
+      cardEl.style.background = slot.status === 'full' ? '#fef2f2' : '';
+
+      if (statusEl) {
+        if (slot.status === 'full') {
+          statusEl.textContent  = 'PARKING FULL';
+          statusEl.style.color  = '#dc2626';
+        } else if (slot.status === 'warning') {
+          statusEl.textContent  = 'ALMOST FULL';
+          statusEl.style.color  = '#f59e0b';
+        } else {
+          statusEl.textContent  = 'Available';
+          statusEl.style.color  = '#6b7280';
+        }
+      }
+    });
+  }
+
   // Init
+  buildParkingCards();
   fetchStats();
   fetchRecentLogs();
+  fetchParkingSlots();
   setInterval(fetchStats, 30000);
+  setInterval(fetchParkingSlots, 5000);
 </script>
 </body>
 </html>"""
@@ -850,11 +964,17 @@ def api_user_stats():
     conn = get_db()
     user = conn.execute("SELECT * FROM users WHERE id=?", (session['user_id'],)).fetchone()
     today = datetime.now().strftime("%Y-%m-%d")
-    total = 0; today_c = 0
-    if user['tag_id']:
-        total   = conn.execute("SELECT COUNT(*) FROM rfid_scans WHERE tag_id=?", (user['tag_id'],)).fetchone()[0]
-        today_c = conn.execute("SELECT COUNT(*) FROM rfid_scans WHERE tag_id=? AND scan_time LIKE ?",
-                               (user['tag_id'], f"{today}%")).fetchone()[0]
+    # Count both RFID tag scans AND QR scans (stored as student_no)
+    sno = user['student_no']
+    tid = user['tag_id'] or ""
+    total   = conn.execute(
+        "SELECT COUNT(*) FROM rfid_scans WHERE tag_id=? OR tag_id=?",
+        (tid, sno)
+    ).fetchone()[0]
+    today_c = conn.execute(
+        "SELECT COUNT(*) FROM rfid_scans WHERE (tag_id=? OR tag_id=?) AND scan_time LIKE ?",
+        (tid, sno, f"{today}%")
+    ).fetchone()[0]
     viols   = conn.execute("SELECT COUNT(*) FROM violations WHERE student_no=?", (user['student_no'],)).fetchone()[0]
     notices = conn.execute("SELECT COUNT(*) FROM notices").fetchone()[0]
     conn.close()
@@ -866,13 +986,13 @@ def api_user_logs():
     limit = request.args.get("limit", 100, type=int)
     conn  = get_db()
     user  = conn.execute("SELECT * FROM users WHERE id=?", (session['user_id'],)).fetchone()
-    logs  = []
-    if user['tag_id']:
-        rows = conn.execute(
-            "SELECT * FROM rfid_scans WHERE tag_id=? ORDER BY id DESC LIMIT ?",
-            (user['tag_id'], limit)
-        ).fetchall()
-        logs = [dict(r) for r in rows]
+    sno  = user['student_no']
+    tid  = user['tag_id'] or ""
+    rows = conn.execute(
+        "SELECT * FROM rfid_scans WHERE tag_id=? OR tag_id=? ORDER BY id DESC LIMIT ?",
+        (tid, sno, limit)
+    ).fetchall()
+    logs = [dict(r) for r in rows]
     conn.close()
     return jsonify({"logs": logs})
 
@@ -902,17 +1022,11 @@ def api_user_qr():
     conn = get_db()
     user = conn.execute("SELECT * FROM users WHERE id=?", (session['user_id'],)).fetchone()
     conn.close()
-    qr_data = json.dumps({
-        "student_no":   user['student_no'],
-        "name":         user['full_name'],
-        "position":     user['position'],
-        "college":      user['college'],
-        "department":   user['department'],
-        "vehicle_type": user['vehicle_type'],
-        "vehicle_model":user['vehicle_model'],
-        "tag_id":       user['tag_id']
-    })
-    qr_img = qrcode.make(qr_data)
+    # Simple QR — only student_no makes it less dense and easier to scan
+    qr_data = user['student_no']
+    qr_img = qrcode.make(
+        qr_data,
+    )
     buf = io.BytesIO()
     qr_img.save(buf, format="PNG")
     buf.seek(0)
@@ -929,6 +1043,475 @@ def admin():
 @app.route("/static/<path:filename>")
 def static_files(filename):
     return send_file(f"static/{filename}")
+
+# ── QR SCANNER ────────────────────────────────────────────────────────────────
+QR_SCANNER_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MMSU CCIS Parking — Gate Scanner</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden}
+  body{font-family:'DM Sans',sans-serif;background:#0a1628;color:white;display:flex;flex-direction:column}
+
+  /* TOP BAR */
+  .topbar{background:#1a5c36;padding:12px 28px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+  .topbar-left{display:flex;align-items:center;gap:12px}
+  .topbar-logo{width:44px;height:44px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,0.3)}
+  .topbar-title{font-family:'Playfair Display',serif;font-size:1.05rem;color:white}
+  .topbar-title span{display:block;font-size:0.72rem;font-weight:400;opacity:0.7;font-family:'DM Sans',sans-serif}
+  .topbar-clock{font-size:1.1rem;font-weight:600;color:rgba(255,255,255,0.9);letter-spacing:0.05em}
+
+  /* MAIN LAYOUT — full height kiosk */
+  .kiosk{flex:1;display:grid;grid-template-columns:1fr 1fr;overflow:hidden}
+
+  /* LEFT — CAMERA */
+  .cam-side{background:#0d1f12;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;gap:16px;border-right:1px solid #1a3a2a}
+  .cam-label{font-size:0.78rem;font-weight:600;color:#4ade80;text-transform:uppercase;letter-spacing:0.1em}
+  .cam-wrap{position:relative;width:100%;max-width:480px;border-radius:16px;overflow:hidden;background:#000;border:3px solid #1a5c36}
+  video{width:100%;display:block;aspect-ratio:4/3;object-fit:cover}
+  canvas{display:none}
+  .cam-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.3)}
+  .cam-box{width:220px;height:220px;position:relative}
+  .cam-box::before,.cam-box::after{content:'';position:absolute;width:36px;height:36px;border-color:#4ade80;border-style:solid}
+  .cam-box::before{top:0;left:0;border-width:4px 0 0 4px;border-radius:4px 0 0 4px}
+  .cam-box::after{top:0;right:0;border-width:4px 4px 0 0;border-radius:0 4px 0 0}
+  .cam-box-bl,.cam-box-br{position:absolute;width:36px;height:36px;border-color:#4ade80;border-style:solid}
+  .cam-box-bl{bottom:0;left:0;border-width:0 0 4px 4px;border-radius:0 0 0 4px}
+  .cam-box-br{bottom:0;right:0;border-width:0 4px 4px 0;border-radius:0 0 4px 0}
+  .scan-beam{position:absolute;left:10px;right:10px;height:2px;background:linear-gradient(90deg,transparent,#4ade80,transparent);animation:beam 2s ease-in-out infinite}
+  @keyframes beam{0%{top:10px}100%{top:calc(100% - 10px)}}
+  .cam-instruction{font-size:1rem;color:#94a3b8;text-align:center}
+  .cam-instruction strong{display:block;color:#e2e8f0;font-size:1.1rem;margin-bottom:4px}
+  .cam-status{display:flex;align-items:center;gap:8px;font-size:0.82rem}
+  .dot{width:9px;height:9px;border-radius:50%;background:#4ade80}
+  .dot.pulse{animation:dp 1.4s infinite}
+  @keyframes dp{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.4;transform:scale(0.8)}}
+  .dot.err{background:#ef4444;animation:none}
+
+  /* RIGHT — RESULT */
+  .result-side{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px;background:#0a1628;transition:background 0.5s}
+  .result-side.granted{background:#061a0e}
+  .result-side.denied{background:#1a0606}
+  .result-side.full{background:#1a0d00}
+
+  /* Idle state */
+  .idle-state{text-align:center}
+  .idle-state .big-icon{font-size:5rem;margin-bottom:16px;opacity:0.4}
+  .idle-state p{color:#475569;font-size:1rem}
+  .idle-state strong{display:block;color:#64748b;font-size:1.3rem;margin-bottom:8px}
+
+  /* Result state */
+  .scan-result{display:none;width:100%;max-width:420px}
+  .result-status{text-align:center;margin-bottom:24px}
+  .result-icon{font-size:4rem;margin-bottom:8px}
+  .result-status-text{font-size:1.6rem;font-weight:700;margin-bottom:4px}
+  .result-status-text.green{color:#4ade80}
+  .result-status-text.red{color:#ef4444}
+  .result-status-text.orange{color:#f59e0b}
+  .result-sub{font-size:0.88rem;color:#64748b}
+
+  .user-card{background:#0f172a;border-radius:16px;padding:20px;margin-bottom:14px}
+  .user-card-top{display:flex;align-items:center;gap:14px;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid #1e293b}
+  .avatar{width:52px;height:52px;border-radius:50%;background:#1a5c36;display:flex;align-items:center;justify-content:center;font-size:1.3rem;font-weight:700;flex-shrink:0}
+  .uname{font-size:1.05rem;font-weight:600;color:#e2e8f0}
+  .uid{font-size:0.8rem;color:#64748b;margin-top:3px}
+  .detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .detail-item .dl{font-size:0.7rem;color:#475569;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:3px}
+  .detail-item .dv{font-size:0.88rem;font-weight:600;color:#cbd5e1}
+
+  .slot-bar{background:#0f172a;border-radius:12px;padding:14px;display:flex;justify-content:space-between;align-items:center}
+  .slot-bar .sl{font-size:0.8rem;color:#64748b}
+  .slot-bar .sv{font-size:1.1rem;font-weight:700;color:#4ade80}
+  .slot-bar .sv.full{color:#ef4444}
+  .scan-timestamp{text-align:center;font-size:0.78rem;color:#334155;margin-top:10px}
+
+  /* Auto-reset countdown */
+  .countdown{position:absolute;bottom:16px;right:20px;font-size:0.75rem;color:#334155}
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="topbar">
+  <div class="topbar-left">
+    <img src="/static/logo.jpg" class="topbar-logo" alt="MMSU">
+    <div class="topbar-title">
+      MMSU CCIS Parking Gate
+      <span>Scan your QR Code to enter</span>
+    </div>
+  </div>
+  <div class="topbar-clock" id="clock">--:--:--</div>
+</div>
+
+<!-- KIOSK BODY -->
+<div class="kiosk">
+
+  <!-- LEFT: CAMERA -->
+  <div class="cam-side">
+    <div class="cam-label">📷 QR Code Reader</div>
+    <div class="cam-wrap">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="canvas"></canvas>
+      <div class="cam-overlay">
+        <div class="cam-box">
+          <div class="cam-box-bl"></div>
+          <div class="cam-box-br"></div>
+          <div class="scan-beam"></div>
+        </div>
+      </div>
+    </div>
+    <div class="cam-instruction">
+      <strong>Place your QR Code inside the frame</strong>
+      Hold steady until it beeps
+    </div>
+    <div class="cam-status">
+      <div class="dot pulse" id="status-dot"></div>
+      <span id="status-text">Initializing camera...</span>
+    </div>
+  </div>
+
+  <!-- RIGHT: RESULT -->
+  <div class="result-side" id="result-side">
+
+    <!-- Idle -->
+    <div class="idle-state" id="idle-state">
+      <div class="big-icon">&#128247;</div>
+      <strong>Waiting for QR Code...</strong>
+      <p>Show your QR code to the camera on the left</p>
+    </div>
+
+    <!-- Scan result -->
+    <div class="scan-result" id="scan-result" style="position:relative">
+      <div class="result-status">
+        <div class="result-icon" id="res-icon">✅</div>
+        <div class="result-status-text green" id="res-status-text">ACCESS GRANTED</div>
+        <div class="result-sub" id="res-sub">Entry has been logged</div>
+      </div>
+      <div class="user-card">
+        <div class="user-card-top">
+          <div class="avatar" id="res-avatar">?</div>
+          <div>
+            <div class="uname" id="res-name">—</div>
+            <div class="uid" id="res-id">—</div>
+          </div>
+        </div>
+        <div class="detail-grid">
+          <div class="detail-item"><div class="dl">Position</div><div class="dv" id="res-position">—</div></div>
+          <div class="detail-item"><div class="dl">College</div><div class="dv" id="res-college">—</div></div>
+          <div class="detail-item"><div class="dl">Vehicle</div><div class="dv" id="res-vehicle">—</div></div>
+          <div class="detail-item"><div class="dl">Department</div><div class="dv" id="res-dept">—</div></div>
+        </div>
+      </div>
+      <div class="slot-bar">
+        <span class="sl" id="res-slot-label">Parking Slot</span>
+        <span class="sv" id="res-slot-val">—</span>
+      </div>
+      <div class="scan-timestamp" id="res-time">—</div>
+      <div class="countdown" id="countdown"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  // Clock
+  setInterval(() => {
+    document.getElementById('clock').textContent = new Date().toLocaleTimeString('en-PH');
+  }, 1000);
+
+  const video  = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+  let lastData = ''; let lastTime = 0; let resetTimer = null; let countdownInterval = null;
+
+  async function startCamera() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams    = devices.filter(d => d.kind === 'videoinput');
+      const brio    = cams.find(c => c.label.toLowerCase().includes('brio') || c.label.toLowerCase().includes('logitech'));
+      const stream  = await navigator.mediaDevices.getUserMedia({
+        video: brio
+          ? {deviceId:{exact:brio.deviceId}, width:1280, height:720}
+          : {width:1280, height:720}
+      });
+      video.srcObject = stream;
+      video.addEventListener('loadedmetadata', () => {
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        document.getElementById('status-dot').className = 'dot pulse';
+        document.getElementById('status-text').textContent = brio ? 'Logitech Brio ready' : 'Camera ready';
+        requestAnimationFrame(tick);
+      });
+    } catch(e) {
+      document.getElementById('status-dot').className = 'dot err';
+      document.getElementById('status-text').textContent = 'Camera error: ' + e.message;
+    }
+  }
+
+  function tick() {
+    requestAnimationFrame(tick);
+    if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const img  = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(img.data, img.width, img.height, {inversionAttempts:'dontInvert'});
+    if (!code) return;
+    const now = Date.now();
+    if (code.data === lastData && now - lastTime < 6000) return;
+    lastData = code.data; lastTime = now;
+    processQR(code.data);
+  }
+
+  async function processQR(raw) {
+    document.getElementById('status-text').textContent = 'QR detected! Logging entry...';
+    try {
+      const res  = await fetch('/api/qr/scan', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({qr_data: raw})
+      });
+      const data = await res.json();
+      showResult(data);
+    } catch(e) {
+      document.getElementById('status-text').textContent = 'Server error. Try again.';
+    }
+  }
+
+  function showResult(data) {
+    clearTimeout(resetTimer);
+    clearInterval(countdownInterval);
+
+    document.getElementById('idle-state').style.display  = 'none';
+    document.getElementById('scan-result').style.display = 'block';
+    const side = document.getElementById('result-side');
+
+    if (data.status === 'not_found') {
+      side.className = 'result-side denied';
+      document.getElementById('res-icon').textContent          = '❌';
+      document.getElementById('res-status-text').textContent   = 'UNKNOWN QR CODE';
+      document.getElementById('res-status-text').className     = 'result-status-text red';
+      document.getElementById('res-sub').textContent           = 'This QR code is not registered';
+      document.getElementById('res-name').textContent          = 'Unknown';
+      document.getElementById('res-id').textContent            = '—';
+      document.getElementById('res-avatar').textContent        = '?';
+      document.getElementById('res-slot-val').textContent      = '—';
+      startCountdown(6);
+      return;
+    }
+
+    const u = data.user;
+    const initials = (u.full_name||'U').split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase();
+    document.getElementById('res-avatar').textContent   = initials;
+    document.getElementById('res-name').textContent     = u.full_name   || '—';
+    document.getElementById('res-id').textContent       = u.student_no  + ' · ' + (u.position||'Student');
+    document.getElementById('res-position').textContent = u.position    || '—';
+    document.getElementById('res-college').textContent  = u.college     || '—';
+    document.getElementById('res-vehicle').textContent  = u.vehicle_type|| '—';
+    document.getElementById('res-dept').textContent     = u.department  || '—';
+    document.getElementById('res-time').textContent     = 'Logged at ' + data.scan_time;
+
+    if (data.slot) {
+      document.getElementById('res-slot-label').textContent = data.slot.label;
+      const sv = document.getElementById('res-slot-val');
+      if (data.slot.status === 'full') {
+        sv.textContent = 'FULL'; sv.className = 'sv full';
+        side.className = 'result-side full';
+        document.getElementById('res-icon').textContent        = '⚠️';
+        document.getElementById('res-status-text').textContent = 'PARKING FULL';
+        document.getElementById('res-status-text').className   = 'result-status-text orange';
+        document.getElementById('res-sub').textContent         = 'No available slots for your vehicle type';
+      } else {
+        sv.textContent = data.slot.available + ' / ' + data.slot.capacity + ' slots left';
+        sv.className   = 'sv';
+        side.className = 'result-side granted';
+        document.getElementById('res-icon').textContent        = '✅';
+        document.getElementById('res-status-text').textContent = 'ACCESS GRANTED';
+        document.getElementById('res-status-text').className   = 'result-status-text green';
+        document.getElementById('res-sub').textContent         = 'Entry has been logged successfully';
+      }
+    }
+
+    document.getElementById('status-text').textContent = 'Entry logged — ready for next scan';
+    startCountdown(8);
+  }
+
+  function startCountdown(secs) {
+    let t = secs;
+    document.getElementById('countdown').textContent = 'Resetting in ' + t + 's...';
+    countdownInterval = setInterval(() => {
+      t--;
+      document.getElementById('countdown').textContent = t > 0 ? 'Resetting in ' + t + 's...' : '';
+      if (t <= 0) clearInterval(countdownInterval);
+    }, 1000);
+    resetTimer = setTimeout(() => {
+      document.getElementById('idle-state').style.display  = 'block';
+      document.getElementById('scan-result').style.display = 'none';
+      document.getElementById('result-side').className     = 'result-side';
+      document.getElementById('status-text').textContent   = 'Camera ready — waiting for QR code';
+    }, secs * 1000);
+  }
+
+  startCamera();
+</script>
+</body>
+</html>"""
+
+
+@app.route("/qr-scanner")
+def qr_scanner():
+    return QR_SCANNER_HTML
+
+
+@app.route("/api/qr/scan", methods=["POST"])
+def api_qr_scan():
+    import json as _json
+    from datetime import datetime as _dt
+    d = request.json
+    raw = d.get("qr_data", "")
+
+    # QR contains plain student_no
+    student_no = raw.strip()
+
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE student_no=?", (student_no,)).fetchone()
+
+    if not user:
+        conn.close()
+        return jsonify({"status": "not_found"})
+
+    scan_time = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Log entry to rfid_scans (same table as RFID for unified logs)
+    conn.execute("""
+        INSERT INTO rfid_scans (tag_id, scan_time, rssi, antenna, scan_type)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user["student_no"], scan_time, "QR", "QR", "qr_entry"))
+
+    # Also log to qr_scans
+    conn.execute("""
+        INSERT INTO qr_scans (student_no, scan_time, method)
+        VALUES (?, ?, 'qr')
+    """, (student_no, scan_time))
+
+    # Update parking counter
+    position     = (user["position"] or "Student").lower()
+    vehicle_type = (user["vehicle_type"] or "").lower()
+    is_moto  = vehicle_type in ["motorcycle", "motor", "bike"]
+    is_staff = position in ["faculty", "staff"]
+    slot_type = ("faculty" if is_staff else "student") + ("_moto" if is_moto else "_car")
+    slot_labels = {
+        "faculty_car":  "Faculty/PWD Cars",
+        "faculty_moto": "Faculty Motorcycles",
+        "student_car":  "Student Cars",
+        "student_moto": "Student Motorcycles"
+    }
+
+    slot = conn.execute("SELECT * FROM parking_slots WHERE slot_type=?", (slot_type,)).fetchone()
+    slot_info = None
+    if slot:
+        available = slot["capacity"] - slot["occupied"]
+        if available > 0:
+            conn.execute(
+                "UPDATE parking_slots SET occupied=MIN(occupied+1, capacity) WHERE slot_type=?",
+                (slot_type,)
+            )
+            available -= 1
+        pct    = ((slot["capacity"] - available) / slot["capacity"] * 100)
+        status = "full" if available <= 0 else "warning" if pct >= 80 else "ok"
+        slot_info = {
+            "label":    slot_labels.get(slot_type, slot_type),
+            "available": max(0, available),
+            "capacity":  slot["capacity"],
+            "status":    status
+        }
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "status":    "ok",
+        "scan_time": scan_time,
+        "user": {
+            "student_no":   user["student_no"],
+            "full_name":    user["full_name"],
+            "position":     user["position"],
+            "college":      user["college"],
+            "department":   user["department"],
+            "vehicle_type": user["vehicle_type"],
+        },
+        "slot": slot_info
+    })
+
+
+# ── PARKING SLOTS API ─────────────────────────────────────────────────────────
+@app.route("/api/parking/slots")
+def api_parking_slots():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM parking_slots").fetchall()
+    conn.close()
+    slots = {}
+    for r in rows:
+        available = r["capacity"] - r["occupied"]
+        pct = (r["occupied"] / r["capacity"] * 100) if r["capacity"] > 0 else 0
+        status = "full" if available <= 0 else "warning" if pct >= 80 else "ok"
+        slots[r["slot_type"]] = {
+            "capacity":  r["capacity"],
+            "occupied":  r["occupied"],
+            "available": max(0, available),
+            "pct":       round(pct),
+            "status":    status
+        }
+    return jsonify(slots)
+
+
+@app.route("/api/parking/update", methods=["POST"])
+def api_parking_update():
+    """Called when RFID scan happens - increments correct slot based on user position+vehicle"""
+    d = request.json
+    student_no = d.get("student_no", "")
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE student_no=?", (student_no,)).fetchone()
+    if not user:
+        conn.close()
+        return jsonify({"status": "error", "message": "User not found"})
+
+    position     = (user["position"] or "Student").lower()
+    vehicle_type = (user["vehicle_type"] or "").lower()
+
+    # Determine slot type
+    is_moto = vehicle_type in ["motorcycle", "motor", "bike"]
+    if position in ["faculty", "staff", "admin"]:
+        slot_type = "faculty_moto" if is_moto else "faculty_car"
+    else:
+        slot_type = "student_moto" if is_moto else "student_car"
+
+    # Check if full
+    slot = conn.execute("SELECT * FROM parking_slots WHERE slot_type=?", (slot_type,)).fetchone()
+    if slot and slot["occupied"] >= slot["capacity"]:
+        conn.close()
+        return jsonify({"status": "full", "slot_type": slot_type})
+
+    # Increment
+    conn.execute(
+        "UPDATE parking_slots SET occupied = MIN(occupied+1, capacity) WHERE slot_type=?",
+        (slot_type,)
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "slot_type": slot_type})
+
+
+@app.route("/api/parking/reset", methods=["POST"])
+def api_parking_reset():
+    """Admin resets all counters to 0 (e.g. start of day)"""
+    conn = get_db()
+    conn.execute("UPDATE parking_slots SET occupied=0")
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "reset"})
+
 
 if __name__ == "__main__":
     init_db()
