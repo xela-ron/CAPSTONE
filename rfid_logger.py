@@ -1,26 +1,62 @@
 """
-UHF RFID Logger + QR Code Scanner - QB0A M-Series Reader (915MHz)
-Runs both RFID and Logitech Brio QR scanner simultaneously in one script.
+RFID LOGGER - ENTRY GATE ONLY
+UHF RFID Logger for QB0A M-Series Reader (915MHz)
 COM3, 57600 baud
+ENTRY ONLY - Will show "Already Inside" if scanned twice
 """
 
 import serial
 import sqlite3
 import time
-import threading
 import urllib.request
 import json
 from datetime import datetime
+import pytz
+import winsound
+import threading
 
-PORT     = "COM3"
+_PH_TZ = pytz.timezone("Asia/Manila")
+
+PORT = "COM3"
 BAUDRATE = 57600
-DB_FILE  = "rfid_logs.db"
+DB_FILE = "rfid_logs.db"
 
 CMD_SINGLE_INVENTORY = bytes([0x7C, 0xFF, 0xFF, 0x20, 0x00, 0x00, 0x66])
 
-# Cooldown tracker — prevents double scan within 6 seconds
+# Cooldown tracker
 recent_scans = {}
 COOLDOWN_SECS = 6
+
+# Prevent sending the same tag repeatedly
+last_sent_tag = ""
+last_sent_time = 0
+SEND_COOLDOWN = 5
+
+
+def play_alarm(duration_seconds=5):
+    """Play warning alarm"""
+    def alarm_thread():
+        end_time = time.time() + duration_seconds
+        print("\n" + "=" * 50)
+        print("⚠️  WARNING ALARM - ACCESS DENIED! ⚠️")
+        print("=" * 50)
+        try:
+            for _ in range(duration_seconds * 2):
+                if time.time() >= end_time:
+                    break
+                winsound.Beep(1000, 300)
+                time.sleep(0.2)
+        except:
+            for i in range(duration_seconds):
+                if time.time() >= end_time:
+                    break
+                print("\a", end="", flush=True)
+                time.sleep(1)
+        print("\n" + "=" * 50)
+        print("✓ Alarm ended")
+        print("=" * 50)
+    alarm_thread_obj = threading.Thread(target=alarm_thread, daemon=True)
+    alarm_thread_obj.start()
 
 
 def is_cooldown(key):
@@ -53,7 +89,7 @@ def init_db():
     print(f"[DB] Database ready: {DB_FILE}")
 
 
-def update_parking(student_no, label="RFID"):
+def update_parking(student_no):
     try:
         payload = json.dumps({"student_no": student_no}).encode()
         req = urllib.request.Request(
@@ -62,66 +98,158 @@ def update_parking(student_no, label="RFID"):
             headers={"Content-Type": "application/json"},
             method="POST"
         )
-        resp   = urllib.request.urlopen(req, timeout=2)
-        result = json.loads(resp.read())
-        if result.get("status") == "full":
-            print(f"[{label}] PARKING FULL — slot: {result.get('slot_type')}")
-        else:
-            print(f"[{label}] Parking updated — slot: {result.get('slot_type')}")
+        urllib.request.urlopen(req, timeout=2)
+        print(f"[PARKING] Updated for {student_no}")
     except Exception as e:
-        print(f"[{label}] Could not update parking: {e}")
+        print(f"[PARKING] Error: {e}")
+
+
+def send_to_kiosk_api(tag_id, is_exit=False, status="ok", message=""):
+    """Send RFID scan to kiosk using same endpoint as QR code"""
+    global last_sent_tag, last_sent_time
+
+    now = time.time()
+    if tag_id == last_sent_tag and now - last_sent_time < SEND_COOLDOWN:
+        print(f"[API  ] Cooldown - skipping duplicate send for tag {tag_id[:8]}...")
+        return
+
+    last_sent_tag = tag_id
+    last_sent_time = now
+
+    try:
+        mode = "exit" if is_exit else "entry"
+
+        payload = json.dumps({
+            "qr_data": tag_id,
+            "mode": mode,
+            "source": "rfid",
+            "status": status,  # Add status to payload
+            "message": message
+        }).encode()
+
+        req = urllib.request.Request(
+            "http://127.0.0.1:5000/api/qr/scan",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        urllib.request.urlopen(req, timeout=2)
+        print(f"[API  ] RFID {mode} sent to kiosk (status: {status})")
+    except Exception as e:
+        print(f"[API  ] Error: {e}")
+
+
+def print_welcome_message(full_name):
+    print("\n" + "=" * 60)
+    print(f"🎉 WELCOME, {full_name.upper()}! 🎉")
+    print("=" * 60)
+    print("✅ Entry granted. Have a safe stay!")
+    print("=" * 60 + "\n")
+
+
+def print_already_inside_message(full_name):
+    print("\n" + "=" * 60)
+    print(f"⚠️  ATTENTION, {full_name.upper()}! ⚠️")
+    print("=" * 60)
+    print("❌ YOU ARE ALREADY INSIDE!")
+    print("📌 Please use the EXIT gate to leave.")
+    print("=" * 60 + "\n")
+
+
+def print_access_denied_message(tag_id):
+    print("\n" + "=" * 60)
+    print("🔴 ACCESS DENIED! 🔴")
+    print("=" * 60)
+    print(f"📡 Unregistered Tag ID: {tag_id[:16]}...")
+    print("🚫 This RFID tag is not registered in the system.")
+    print("=" * 60 + "\n")
+    play_alarm(5)
 
 
 def save_rfid_scan(tag_id, rssi="", antenna=""):
     if is_cooldown(tag_id):
+        print(f"[RFID] Cooldown active for {tag_id[:8]}...")
         return
+
     conn = sqlite3.connect(DB_FILE, timeout=30)
-    scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.row_factory = sqlite3.Row
+
+    user = conn.execute(
+        "SELECT student_no, full_name, position, vehicle_type FROM users WHERE tag_id=?", (tag_id,)
+    ).fetchone()
+
+    # UNREGISTERED TAG
+    if not user:
+        print(f"[RFID] ACCESS DENIED - Unregistered tag: {tag_id}")
+        print_access_denied_message(tag_id)
+        # Send with status "not_found" for kiosk
+        send_to_kiosk_api(tag_id, False, "not_found", "Access Denied")
+        conn.close()
+        return
+
+    student_no = user["student_no"]
+    full_name = user["full_name"]
+    position = user["position"] or "Student"
+    vehicle_type = user["vehicle_type"] or ""
+
+    # Check if user is already inside
+    inside = conn.execute(
+        "SELECT * FROM currently_inside WHERE student_no=?",
+        (student_no,)
+    ).fetchone()
+
+    is_inside = inside is not None
+    scan_time = datetime.now(_PH_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    # ========== ALREADY INSIDE - BLOCK ENTRY ==========
+    if is_inside:
+        print(f"[RFID] BLOCKED - {full_name} is already inside!")
+        print_already_inside_message(full_name)
+        # Send with status "already_inside" for kiosk
+        send_to_kiosk_api(tag_id, False, "already_inside", "Already Inside")
+        conn.close()
+        return
+
+    # ========== ENTRY LOGIC (only when NOT inside) ==========
+    print(f"[RFID] ENTRY — {full_name} is entering")
+    print_welcome_message(full_name)
+
     conn.execute(
-        "INSERT INTO rfid_scans (tag_id, scan_time, rssi, antenna, scan_type) VALUES (?,?,?,?,'rfid')",
+        "INSERT INTO rfid_scans (tag_id, scan_time, rssi, antenna, scan_type) VALUES (?,?,?,?,'rfid_entry')",
         (tag_id, scan_time, rssi, antenna)
     )
-    user = conn.execute(
-        "SELECT student_no, full_name FROM users WHERE tag_id=?", (tag_id,)
-    ).fetchone()
-    conn.commit()
-    conn.close()
-    name = user[1] if user else "Unregistered"
-    print(f"[RFID] {scan_time} | {tag_id} | {name} | RSSI: {rssi}")
-    if user:
-        update_parking(user[0], label="RFID")
 
+    is_moto = vehicle_type.lower() in ["motorcycle", "motor", "bike"]
+    is_staff = position.lower() in ["faculty", "staff"]
+    slot_type = ("faculty" if is_staff else "student") + ("_moto" if is_moto else "_car")
 
-def save_qr_scan(student_no, full_name=""):
-    if is_cooldown(student_no):
-        print(f"[QR  ] Cooldown — skipping duplicate for {student_no}")
-        return
-    conn = sqlite3.connect(DB_FILE, timeout=30)
-    scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
-        "INSERT INTO rfid_scans (tag_id, scan_time, rssi, antenna, scan_type) VALUES (?,?,?,?,'qr')",
-        (student_no, scan_time, "QR", "QR")
+        "INSERT OR REPLACE INTO currently_inside (student_no, entry_time, slot_type) VALUES (?, ?, ?)",
+        (student_no, scan_time, slot_type)
     )
     conn.commit()
     conn.close()
-    print(f"[QR  ] {scan_time} | {student_no} | {full_name}")
-    update_parking(student_no, label="QR ")
+
+    print(f"[RFID] ENTRY LOGGED — {full_name} at {scan_time}")
+    update_parking(student_no)
+    # Send with status "ok" for normal entry
+    send_to_kiosk_api(tag_id, False, "ok", "Welcome")
 
 
 def parse_response(data: bytes):
     tags = []
     i = 0
     while i < len(data) - 23:
-        if data[i] == 0xCC and data[i+1] == 0xFF and data[i+2] == 0xFF:
+        if data[i] == 0xCC and data[i + 1] == 0xFF and data[i + 2] == 0xFF:
             try:
                 if len(data) - i >= 22:
-                    antenna  = data[i + 8]
-                    epc      = data[i+9 : i+21].hex().upper()
-                    rssi_raw = data[i+21]
-                    rssi     = f"-{rssi_raw}dBm"
-                    if len(epc) == 24 and epc != "0"*24 and epc != "F"*24:
+                    antenna = data[i + 8]
+                    epc = data[i + 9: i + 21].hex().upper()
+                    rssi_raw = data[i + 21]
+                    rssi = f"-{rssi_raw}dBm"
+                    if len(epc) == 24 and epc != "0" * 24 and epc != "F" * 24:
                         tags.append((epc, rssi, str(antenna)))
-                        i += 22
+                        i += 24
                         continue
             except Exception:
                 pass
@@ -129,21 +257,15 @@ def parse_response(data: bytes):
     return tags
 
 
-def rfid_thread():
-    print(f"[RFID] Connecting to {PORT} @ {BAUDRATE} baud...")
+def run_continuous(ser):
+    print("[INFO] Continuous ENTRY scan running... Press Ctrl+C to stop")
+    print("[INFO] Hold tag in front of ENTRY antenna\n")
     try:
-        ser = serial.Serial(PORT, BAUDRATE, timeout=1)
-        print(f"[RFID] Connected! Scanning...\n")
-    except Exception as e:
-        print(f"[RFID] ERROR: {e} — RFID disabled, QR only mode\n")
-        return
-
-    while True:
-        try:
+        while True:
             ser.reset_input_buffer()
             ser.write(CMD_SINGLE_INVENTORY)
             buffer = b""
-            t_end  = time.time() + 1.5
+            t_end = time.time() + 1.5
             while time.time() < t_end:
                 if ser.in_waiting > 0:
                     buffer += ser.read(ser.in_waiting)
@@ -154,168 +276,77 @@ def rfid_thread():
                     for tag_id, rssi, ant in tags:
                         save_rfid_scan(tag_id, rssi, ant)
                 else:
-                    print("[RFID] Scanning...")
+                    print("[....] Scanning for entry...")
             else:
-                print("[RFID] Scanning...")
+                print("[....] Scanning for entry... (hold tag near antenna)")
             time.sleep(0.2)
-        except Exception as e:
-            print(f"[RFID] Error: {e}")
-            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[DONE] Entry scanner stopped.")
 
 
-def qr_thread():
+def run_single(ser):
+    print("\n[READY] Press Enter to scan ENTRY tag, Ctrl+C to quit\n")
+    print("NOTE: If already inside, you will see 'ALREADY INSIDE' message\n")
     try:
-        import cv2
-        import numpy as np
-    except ImportError:
-        print("[QR  ] Missing: pip install opencv-python numpy")
-        return
+        while True:
+            input(">> Press Enter to scan entry...")
+            found = False
+            for attempt in range(5):
+                ser.reset_input_buffer()
+                ser.write(CMD_SINGLE_INVENTORY)
+                time.sleep(1.2)
+                buffer = b""
+                deadline = time.time() + 0.5
+                while time.time() < deadline:
+                    if ser.in_waiting > 0:
+                        buffer += ser.read(ser.in_waiting)
+                    time.sleep(0.01)
+                if buffer and len(buffer) > 8:
+                    tags = parse_response(buffer)
+                    if tags:
+                        for tag_id, rssi, ant in tags:
+                            save_rfid_scan(tag_id, rssi, ant)
+                        found = True
+                        break
+                    else:
+                        print(f"[WARN] Retrying... ({attempt + 1}/5)")
+                else:
+                    print(f"[....] No tag, retrying... ({attempt + 1}/5)")
+            if not found:
+                print("[INFO] Tag not found after 5 attempts")
+    except KeyboardInterrupt:
+        print("\n[INFO] Stopped.")
 
-    print("[QR  ] Starting QR scanner...")
 
-    cam_index = 0
-    for i in range(5):
-        t = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-        if t.isOpened():
-            print(f"[QR  ] Camera {i} found")
-            cam_index = i
-            t.release()
-
-    cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    cap.set(cv2.CAP_PROP_FPS, 30)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
-    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
-
-    if not cap.isOpened():
-        print("[QR  ] ERROR: Cannot open camera")
-        return
-
-    qd = cv2.QRCodeDetector()
-
-    print("[QR  ] Warming up (2 sec)...")
-    for _ in range(60):
-        cap.grab()
-    print("[QR  ] Camera ready!\n")
-
-    last_data    = ""
-    last_time    = 0
-    banner_txt   = ""
-    banner_color = (0, 255, 0)
-    banner_until = 0
-    frame_count  = 0
-
-    while True:
-        cap.grab()
-        ret, frame = cap.retrieve()
-        if not ret:
-            time.sleep(0.05)
-            continue
-
-        frame = cv2.flip(frame, 1)
-        frame_count += 1
-        data = ""
-
-        # Only process every 3rd frame to reduce lag
-        if frame_count % 3 == 0:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-            # Try 1: raw frame
-            data, _, _ = qd.detectAndDecode(frame)
-
-            # Try 2: upscaled — helps blurry/small QR
-            if not data:
-                big  = cv2.resize(frame, (1280, 960), interpolation=cv2.INTER_CUBIC)
-                data, _, _ = qd.detectAndDecode(big)
-
-            # Try 3: darkened — fixes bright phone screen
-            if not data:
-                dark = cv2.convertScaleAbs(frame, alpha=0.45, beta=0)
-                data, _, _ = qd.detectAndDecode(dark)
-
-            # Try 4: darkened + upscaled
-            if not data:
-                dark_big = cv2.resize(dark, (1280, 960), interpolation=cv2.INTER_CUBIC)
-                data, _, _ = qd.detectAndDecode(dark_big)
-
-            # Try 5: CLAHE grayscale
-            if not data:
-                clahe    = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-                enhanced = clahe.apply(gray)
-                data, _, _ = qd.detectAndDecode(
-                    cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR))
-
-            # Try 6: threshold
-            if not data:
-                _, thresh = cv2.threshold(gray, 0, 255,
-                                          cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                data, _, _ = qd.detectAndDecode(
-                    cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR))
-
-        now = time.time()
-
-        if data and (data != last_data or now - last_time > COOLDOWN_SECS):
-            last_data = data
-            last_time = now
-            print(f"[QR  ] Decoded: {data}")
-
-            student_no = data.strip()
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            user = conn.execute(
-                "SELECT full_name FROM users WHERE student_no=?", (student_no,)
-            ).fetchone()
-            conn.close()
-
-            if user:
-                save_qr_scan(student_no, user[0])
-                banner_txt   = f"GRANTED: {user[0]}"
-                banner_color = (0, 220, 0)
-                print(f"[QR  ] Granted: {user[0]}")
-            else:
-                banner_txt   = "UNKNOWN — NOT REGISTERED"
-                banner_color = (0, 0, 220)
-                print(f"[QR  ] Unknown: {student_no}")
-            banner_until = now + 4
-
-        # Display
-        if now < banner_until:
-            cv2.rectangle(frame, (0,0), (frame.shape[1], 60), (0,0,0), -1)
-            cv2.putText(frame, banner_txt, (10,42),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.1, banner_color, 2)
-        else:
-            cv2.rectangle(frame, (0,0), (frame.shape[1], 40), (0,0,0), -1)
-            cv2.putText(frame, "MMSU CCIS  |  Show QR to camera",
-                        (10,28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,200), 1)
-
-        h, w = frame.shape[:2]
-        cx, cy, hs = w//2, h//2, 120
-        cv2.rectangle(frame, (cx-hs, cy-hs), (cx+hs, cy+hs), (0,255,0), 2)
-
-        cv2.imshow("MMSU CCIS QR Scanner  [Q = quit]", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-    print("[QR  ] Camera closed.")
 def main():
     init_db()
-    print("=" * 55)
-    print("  MMSU CCIS Parking — Gate Scanner v2")
-    print("  RFID + QR running simultaneously")
-    print("=" * 55 + "\n")
+    print("=" * 60)
+    print("  MMSU CCIS Parking — RFID ENTRY Scanner ONLY")
+    print("  - First scan: ENTRY granted")
+    print("  - Second scan: ALREADY INSIDE (blocked)")
+    print("  - Use EXIT logger for exiting")
+    print("=" * 60 + "\n")
 
-    # RFID runs in background thread
-    t = threading.Thread(target=rfid_thread, daemon=True)
-    t.start()
-    time.sleep(1)
+    print("Choose mode:")
+    print("  1. Single scan (press Enter each time)")
+    print("  2. Continuous scan (auto)")
+    choice = input("Enter 1 or 2: ").strip()
 
-    # QR runs in main thread (OpenCV requirement)
-    qr_thread()
+    print(f"[SERIAL] Connecting to {PORT}...")
+    try:
+        ser = serial.Serial(PORT, BAUDRATE, timeout=1, dsrdtr=False, rtscts=False)
+        print(f"[SERIAL] Connected!\n")
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        return
 
-    print("\n[INFO] Scanner stopped.")
+    if choice == "1":
+        run_single(ser)
+    else:
+        run_continuous(ser)
+
+    ser.close()
+    print("\n[INFO] Entry scanner stopped.")
 
 
 if __name__ == "__main__":

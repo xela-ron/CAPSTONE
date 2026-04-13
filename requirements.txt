@@ -3,3 +3,4 @@ pyserial
 openpyxl
 qrcode[pil]
 pillow
+pyzbar
