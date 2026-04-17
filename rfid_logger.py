@@ -160,7 +160,7 @@ def print_access_denied_message(tag_id):
     print("\n" + "=" * 60)
     print("🔴 ACCESS DENIED! 🔴")
     print("=" * 60)
-    print(f"📡 Unregistered Tag ID: {tag_id[:16]}...")
+    print(f"📡 Unregistered Tag ID: {tag_id}")
     print("🚫 This RFID tag is not registered in the system.")
     print("=" * 60 + "\n")
     play_alarm(5)

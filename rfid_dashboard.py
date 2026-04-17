@@ -237,6 +237,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .status-active { background: rgba(0,180,216,0.12); color: #0088a0; }
     .status-inactive { background: rgba(220,38,38,0.12); color: #dc2626; }
     .print-card { background: white; border-radius: 16px; padding: 20px; text-align: center; margin-bottom: 20px; border: 1px solid #e0e8f0; }
+    .modal-bg { display: none; position: fixed; inset: 0; background: rgba(10,22,40,0.6); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+    .modal { background: white; border-radius: 20px; padding: 32px; width: 100%; max-width: 480px; box-shadow: 0 24px 60px rgba(0,0,0,0.2); border: 1px solid rgba(0,180,216,0.15); }
+    .modal h2 { font-size: 1.3rem; color: #0a1628; margin-bottom: 22px; font-weight: 700; }
+    .modal h2 span { color: #00b4d8; }
+    .form-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+    .form-row label { font-size: 0.82rem; font-weight: 600; color: #5a6a7a; text-transform: uppercase; letter-spacing: 0.04em; }
+    .form-row input, .form-row select { background: #f8fafc; border: 2px solid #e0e8f0; color: #0a1628; padding: 10px 14px; border-radius: 10px; font-size: 0.88rem; font-family: Inter, sans-serif; outline: none; transition: border 0.2s; width: 100%; }
+    .form-row input:focus, .form-row select:focus { border-color: #00b4d8; background: white; }
+    .modal-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }
   </style>
 </head>
 <body>
@@ -362,7 +371,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <input type="text" id="search-user" placeholder="🔍 Search users..." oninput="filterUsers()" style="width:280px">
   </div>
   <div class="table-wrap">
-    <tr>
+    <table>
       <thead><tr>
         <th>Student No.</th><th>Full Name</th><th>Position</th><th>College</th>
         <th>Vehicle</th><th>RFID Tag</th><th>Registered</th><th>Actions</th>
