@@ -750,6 +750,20 @@ function downloadVisitorQR(visitorId, qrBase64) {
   a.click();
 }
 
+async function toggleVisitorStatus(visitorId, currentStatus) {
+  const newStatus = currentStatus == 1 ? 0 : 1;
+  const label = newStatus == 1 ? 'Activate' : 'Deactivate';
+  if (!confirm(label + ' visitor ' + visitorId + '?')) return;
+  const r = await fetch('/api/visitors/toggle', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({visitor_id: visitorId, is_active: newStatus})
+  });
+  const d = await r.json();
+  if (d.status === 'ok') fetchVisitors();
+  else alert('Error toggling visitor status');
+}
+
 async function printAllVisitorQR() {
   const r = await fetch('/api/visitors');
   const d = await r.json();

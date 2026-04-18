@@ -1103,10 +1103,10 @@ QR_SCANNER_HTML = '''<!DOCTYPE html>
   .detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .detail-item .dl{font-size:0.67rem;color:#6a7a8a;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px}
   .detail-item .dv{font-size:0.85rem;font-weight:600;color:#c8d8e8}
-  .slot-bar{background:rgba(255,255,255,0.03);border:1px solid rgba(0,180,216,0.1);border-radius:14px;padding:14px 18px;display:flex;justify-content:space-between;align-items:center}
-  .slot-bar .sl{font-size:0.8rem;color:#8a9aaa}
-  .slot-bar .sv{font-size:1rem;font-weight:700;color:#00b4d8}
-  .slot-bar .sv.full{color:#f4a261}
+  .slot-bar{background:linear-gradient(135deg,rgba(0,180,216,0.12),rgba(244,162,97,0.08));border:2px solid rgba(0,180,216,0.4);border-radius:16px;padding:18px 22px;display:flex;justify-content:space-between;align-items:center;margin-top:4px;box-shadow:0 4px 16px rgba(0,180,216,0.15)}
+  .slot-bar .sl{font-size:1rem;font-weight:700;color:#e0f0ff;text-transform:uppercase;letter-spacing:0.04em}
+  .slot-bar .sv{font-size:1.6rem;font-weight:800;color:#00e5ff;text-shadow:0 0 12px rgba(0,229,255,0.5)}
+  .slot-bar .sv.full{color:#f4a261;text-shadow:0 0 12px rgba(244,162,97,0.5)}
   .scan-ts{text-align:center;font-size:0.72rem;color:#6a7a8a;margin-top:12px}
   .countdown{position:absolute;bottom:16px;right:20px;font-size:0.72rem;color:#6a7a8a}
   .recent-ticker{position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.4);padding:10px 24px;display:flex;align-items:center;gap:12px;font-size:0.75rem;color:#8a9aaa;border-top:1px solid rgba(244,162,97,0.15)}
@@ -1894,7 +1894,7 @@ def login():
             session['student_no'] = user['student_no']
             session['is_admin'] = bool(user['is_admin'])
             if user['is_admin']:
-                return redirect('/admin')
+                return redirect('http://127.0.0.1:5001')
             return redirect('/dashboard')
         return render_template_string(LOGIN_HTML, error="Invalid ID number or password.", success=None)
 
